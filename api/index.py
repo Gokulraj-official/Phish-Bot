@@ -1,9 +1,5 @@
 #!/usr/bin/env python3
-"""
-PhantomLink Ultimate – Full Digital Recon Simulation
-Author: CAT Shadow Hacker
-⚠️ USE ONLY ON DEVICES YOU OWN OR WITH WRITTEN AUTHORISATION.
-"""
+
 import os, json, base64, logging, time
 from flask import Flask, request, render_template_string
 import requests as req
